@@ -54,13 +54,13 @@ export default {
                     permission: this.$can('view_notification_settings'),
                     props: { specific: !Boolean(tenant.is_single), alias: 'tenant' }
                 },
-                {
-                    'name': this.$t('update'),
-                    'title': this.$t('update'),
-                    'component': 'app-update',
-                    'permission': true,
-                    'props': "",
-                },
+                // {
+                //     'name': this.$t('update'),
+                //     'title': this.$t('update'),
+                //     'component': 'app-update',
+                //     'permission': true,
+                //     'props': "",
+                // },
             ]
         }
     }
