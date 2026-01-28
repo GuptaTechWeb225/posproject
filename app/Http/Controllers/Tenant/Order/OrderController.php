@@ -11,6 +11,7 @@ use App\Services\Tenant\Order\OrderService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class OrderController extends Controller
 {
@@ -40,7 +41,7 @@ class OrderController extends Controller
     public function store(Request $request)
     {
         $cashCounter = CashRegister::query()->find(request('cash_register_id'));
-        if(($cashCounter->status_id !== resolve(StatusRepository::class)->cash_counterOpen())) {
+        if (($cashCounter->status_id !== resolve(StatusRepository::class)->cash_counterOpen())) {
             throw new GeneralException(__t('please_open_counter_to_order'), 422);
         }
 
@@ -56,9 +57,9 @@ class OrderController extends Controller
                 ->sendAutoSms()
                 ->generateSalesInvoiceTemplate();
             DB::commit();
+
             return $order;
-        }
-        catch (\Exception $exception) {
+        } catch (\Exception $exception) {
             DB::rollBack();
             throw new GeneralException($exception->getMessage());
         }
@@ -164,6 +165,20 @@ class OrderController extends Controller
 
         return $this->service->setModel($order)->generateSalesInvoiceTemplate();
     }
+    public function receiveDuePayment(Request $request, Order $order)
+    {
+        $request->validate([
+            'amount' => 'required|numeric|min:0.01',
+            'payment_method_id' => 'required|exists:payment_methods,id',
+            'note' => 'nullable|string|max:500',
+        ]);
 
-
+        return $this->service
+            ->setModel($order)
+            ->receiveDuePayment($request->only([
+                'amount',
+                'payment_method_id',
+                'note'
+            ]));
+    }
 }

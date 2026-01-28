@@ -16,7 +16,7 @@ namespace Illuminate\Support\Facades;
  * @method static void extend(string $name, callable $resolver)
  * @method static void forgetExtension(string $name)
  * @method static array getConnections()
- * @method static void setReconnector(callable $reconnector)
+ * @method static void setReconnector(callable $reconnector)    
  * @method static \Illuminate\Database\DatabaseManager setApplication(\Illuminate\Contracts\Foundation\Application $app)
  * @method static void macro(string $name, object|callable $macro)
  * @method static void mixin(object $mixin, bool $replace = true)

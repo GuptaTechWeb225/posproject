@@ -93,17 +93,36 @@
                             </button>
                         </div>
 
-                        <div class="col-12 py-2 d-flex justify-content-between">
-                            <button class="btn btn-secondary" style="width: 48%" @click="handlePaymentModalCloseEvent">
+                        <div class="col-12 py-2 d-flex justify-content-between" style="gap: 12px;">
+                           
+                           <div class="d-flex" style="gap: 8px;">
+                             <button class="btn btn-secondary"  @click="handlePaymentModalCloseEvent">
                                 {{ $t('cancel') }}
                             </button>
-                            <button v-if="activePaymentMethods.length" style="width: 48%"
-                                :class="`btn btn-primary ${!availablePaymentMethodOptions.length && dueAmount ? 'custom-disable' : ''}`"
-                                :disabled="paymentDone"
+                            <button 
+                                v-if="dueAmount > 0 && availablePaymentMethodOptions.length > 0"
+                                class="btn btn-outline-primary flex-fill"
                                 @click.prevent="handlePaymentBtnClick"
+                                :disabled="paymentDone || orderRequestPending"
                             >
-                                {{ dueAmount ? $t('add_payment') : $t('done_payment') }}
+                                {{ $t('add_payment') }}
                             </button>
+
+                            <button 
+                                v-if="activePaymentMethods.length"
+                                class="btn btn-primary flex-fill"
+                                @click.prevent="submitPayment"
+                                :disabled="paymentDone || orderRequestPending || (isWalkInCustomer && !isFullPaymentDone)"
+                            >
+                               <template v-if="dueAmount > 0 && !isWalkInCustomer">
+                                {{ $t('complete with due') || 'Complete with Due' }}
+                            </template>
+
+                                <template v-else>
+                                    {{ $t('done_payment') }}
+                                </template>
+                            </button>
+                        </div>
                         </div>
                     </div>
 
@@ -200,19 +219,22 @@ export default {
                 this.formData.branch_or_warehouse_id = newBranchOrWarehouseId;
             }
         },
-        'formData.paid_amount'() { // setting dynamic values to formData from here
-            this.formData.change_return = +this.changeAmount.toFixed(2);
-            this.formData.payment_type = 'full_payment';
-            const creditAmount = this.activePaymentMethods.find(pmo => pmo.alias.toLowerCase() === 'credit');
-            if (creditAmount) {
-                +creditAmount.paidAmount ? this.formData.payment_type = 'partial_payment' : '';
-                this.formData.due_amount = +creditAmount.paidAmount ?? 0;
-            }
-            this.formData.transactions = this.activePaymentMethods.map(apm => ({
-                payment_method_id: apm.id,
-                amount: +apm.paidAmount
-            }));
-            this.formData.paid_amount = +this.formData.paid_amount;
+       'formData.paid_amount'() {
+            const paid = +this.formData.paid_amount;
+            const total = +this.getGrandTotal;
+
+            this.formData.change_return = paid > total ? +(paid - total).toFixed(2) : 0;
+            this.formData.due_amount = paid < total ? +(total - paid).toFixed(2) : 0;
+
+            this.formData.payment_type =
+                this.formData.due_amount > 0 ? 'partial_payment' : 'full_payment';
+
+            this.formData.transactions = this.activePaymentMethods
+                .filter(pm => +pm.paidAmount > 0)
+                .map(pm => ({
+                    payment_method_id: pm.id,
+                    amount: +pm.paidAmount
+                }));
         },
         totalAmountPaid(newAmount) {
             this.formData.paid_amount = newAmount;
@@ -243,6 +265,13 @@ export default {
             if (this.formData.paid_amount < this.getGrandTotal) return 0;
             return this.formData.paid_amount - this.getGrandTotal;
         },
+         isWalkInCustomer() {
+        return +this.getSelectedCustomer === 1;
+    },
+
+    isFullPaymentDone() {
+        return +this.totalAmountPaid >= +this.getGrandTotal;
+    },
         ...mapGetters([
             'getSelectedCustomer',
             'getBranchOrWarehouseId',
@@ -366,13 +395,13 @@ export default {
             this.formData = {...this.formData, total_tax: this.getTaxAmount, due_amount: this.formData.due_amount ? this.formData.due_amount : 0}
             axiosPost(STORE_ORDER, {
                 ...this.formData,
-                paid_amount: this.formData.due_amount ? (this.formData.paid_amount - this.formData.due_amount) : this.formData.paid_amount
+                paid_amount: this.formData.paid_amount
             })
                 .then((res) => {
                     this.contentHtml = res.data.invoice_template;
                     this.paymentDone = true;
-                    this.setProducts(); // getting the product and its stock data after a sale
-                    this.printAria = true; // temporary
+                    this.setProducts(); 
+                    this.printAria = true; 
                     this.prepareInvoice()
                 })
                 .catch(e => {

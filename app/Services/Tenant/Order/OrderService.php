@@ -9,6 +9,8 @@ use App\Models\Core\Setting\Setting;
 use App\Models\Pos\Inventory\Stock\Stock;
 use App\Models\Tenant\InvoiceTemplate\InvoiceTemplate;
 use App\Models\Tenant\Order\Order;
+use App\Models\Tenant\Customer\CustomerLedger;
+use App\Models\Tenant\Customer\CustomerTransaction;
 use App\Models\Tenant\Sales\Cash\CashRegister;
 use App\Models\Tenant\Sales\Cash\CashRegisterLog;
 use App\Models\Tenant\SmsTemplate\SmsTemplate;
@@ -17,6 +19,8 @@ use App\Repositories\Core\Status\StatusRepository;
 use App\Services\Tenant\TenantService;
 use Carbon\Carbon;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
 use PDF;
 
 class OrderService extends TenantService
@@ -89,19 +93,26 @@ class OrderService extends TenantService
 
     public function storeOrder(): static
     {
+        Log::info('Entering storeOrder method');
+
+        // Determine status
         if ($this->getAttribute('is_being_held')) {
             $statusId = resolve(StatusRepository::class)->orderHold();
         } else {
-            $statusId = $this->getAttribute('due_amount') > 0 ? resolve(StatusRepository::class)->orderDue() : resolve(StatusRepository::class)->orderDone();
+            $statusId = ($this->getAttribute('due_amount') ?? 0) > 0
+                ? resolve(StatusRepository::class)->orderDue()
+                : resolve(StatusRepository::class)->orderDone();
         }
 
+        // ── Create or update order ────────────────────────────────────────
         if ($this->getAttribute('id')) {
-            //hold order on process for
+            // Updating existing hold order
             $order = $this->model->query()->find($this->getAttribute('id'));
-            if ($order) {
-                if ($order->status_id == resolve(StatusRepository::class)->orderHold()) {
-                    $order->orderProducts()->delete();
-                    $orderInfo = array_merge($this->getAttributes(
+            if ($order && $order->status_id === resolve(StatusRepository::class)->orderHold()) {
+                $order->orderProducts()->delete();
+
+                $order->update(array_merge(
+                    $this->getAttributes([
                         'branch_or_warehouse_id',
                         'cash_register_id',
                         'customer_id',
@@ -118,48 +129,168 @@ class OrderService extends TenantService
                         'paid_amount',
                         'change_return',
                         'payment_note',
-                        'note'),
-                        [
-                            'ordered_at' => date('Y-m-d'),
-                            'created_by' => auth()->id(),
-                            'tenant_id' => 1,
-                            'status_id' => $statusId
-                        ]);
-                    $order->update($orderInfo);
-                    $this->setModel($order);
-                }
+                        'note'
+                    ]),
+                    [
+                        'ordered_at'   => now(),
+                        'created_by'   => auth()->id(),
+                        'tenant_id'    => 1,
+                        'status_id'    => $statusId,
+                    ]
+                ));
+
+                $this->setModel($order);
             }
         } else {
-            $orderInfo = array_merge($this->getAttributes(
-                'branch_or_warehouse_id',
-                'cash_register_id',
-                'customer_id',
-                'payment_type',
-                'total_tax',
-                'tax_id',
-                'discount_id',
-                'discount_type',
-                'discount_value',
-                'discount',
-                'sub_total',
-                'grand_total',
-                'due_amount',
-                'paid_amount',
-                'change_return',
-                'payment_note',
-                'note',
-                'ordered_at'
-            ),
+            // New order
+            $orderInfo = array_merge(
+                $this->getAttributes([
+                    'branch_or_warehouse_id',
+                    'cash_register_id',
+                    'customer_id',
+                    'payment_type',
+                    'total_tax',
+                    'tax_id',
+                    'discount_id',
+                    'discount_type',
+                    'discount_value',
+                    'discount',
+                    'sub_total',
+                    'grand_total',
+                    'due_amount',
+                    'paid_amount',
+                    'change_return',
+                    'payment_note',
+                    'note',
+                    'ordered_at'
+                ]),
                 [
-                    'tenant_id' => 1,
-                    'created_by' => auth()->id(),
-                    'invoice_number' => $this->invoiceNumber,
+                    'tenant_id'           => 1,
+                    'created_by'          => auth()->id(),
+                    'invoice_number'      => $this->invoiceNumber,
                     'last_invoice_number' => $this->lastInvoiceNumber,
-                    'status_id' => $statusId
-                ]);
+                    'status_id'           => $statusId,
+                ]
+            );
+
             $this->model->fill($orderInfo)->save();
         }
 
+        $order = $this->model;
+
+        $customer = $order->customer;
+
+        if (!$customer || $customer->id === 1) {
+            return $this;
+        }
+
+        $grandTotal   = (float) $order->grand_total;
+        $paidThisTime = (float) ($this->getAttribute('paid_amount') ?? 0);
+        $dueThisTime  = $grandTotal - $paidThisTime;
+
+        Log::info('Order financials', [
+            'grand_total'   => $grandTotal,
+            'paid_this_time' => $paidThisTime,
+            'due_this_time' => $dueThisTime,
+            'order_id'      => $order->id,
+        ]);
+
+        CustomerLedger::create([
+            'customer_id'     => $customer->id,
+            'type'            => 'sale',
+            'direction'       => 'debit',
+            'amount'          => $grandTotal,
+            'description'     => "Sale #{$order->invoice_number}",
+            'reference_type'  => get_class($order),
+            'reference_id'    => $order->id,
+            'created_by'      => auth()->id(),
+        ]);
+
+        if ($paidThisTime > 0) {
+            $transactions = $this->getAttribute('transactions') ?? [];
+
+            foreach ($transactions as $transaction) {
+                $amount = (float) ($transaction['amount'] ?? 0);
+                if ($amount <= 0) continue;
+
+                $ledgerPayment = CustomerLedger::create([
+                    'customer_id'     => $customer->id,
+                    'type'            => 'payment',
+                    'direction'       => 'credit',
+                    'amount'          => $amount,
+                    'description'     => "Payment on sale #{$order->invoice_number}",
+                    'reference_type'  => get_class($order),
+                    'reference_id'    => $order->id,
+                    'created_by'      => auth()->id(),
+                ]);
+
+                CustomerTransaction::create([
+                    'customer_id'        => $customer->id,
+                    'payment_method_id'  => $transaction['payment_method_id'] ?? null,
+                    'cash_register_id'   => $this->getAttribute('cash_register_id'),
+                    'created_by'         => auth()->id(),
+                    'amount'             => $amount,
+                    'type'               => 'payment',
+                    'note'               => $this->getAttribute('payment_note') ?? null,
+                    'customer_ledger_id' => $ledgerPayment->id,
+                ]);
+            }
+        }
+
+        if ($dueThisTime > 0) {
+            $customer->debit($dueThisTime);
+        }
+
+        //   if ($dueThisTime > 0) {
+        //     $customer->debit($dueThisTime);
+        // } elseif ($paidThisTime > $grandTotal) {
+        //     $overpayment = $paidThisTime - $grandTotal;
+        //     $customer->credit($overpayment);
+        // }
+
+        return $this;
+    }
+
+    public function receiveDuePayment(array $data): static
+    {
+        $amount = $data['amount'];
+        $order = $this->model;
+
+        // 1. Update order (legacy support - optional)
+        $order->increment('paid_amount', $amount);
+        $order->decrement('due_amount', $amount);
+
+        if ($order->paid_amount >= $order->grand_total) {
+            $order->status_id = resolve(StatusRepository::class)->orderDone();
+        }
+        $order->save();
+
+        $customer = $order->customer;
+
+        $ledgerEntry = CustomerLedger::create([
+            'customer_id'     => $customer->id,
+            'type'            => 'payment',
+            'direction'       => 'credit',
+            'amount'          => $amount,
+            'description'     => "Due payment - Invoice #{$order->invoice_number}",
+            'reference_type'  => Order::class,
+            'reference_id'    => $order->id,
+            'created_by'      => auth()->id(),
+        ]);
+
+        CustomerTransaction::create([
+            'customer_id'        => $customer->id,
+            'payment_method_id'  => $data['payment_method_id'],
+            'cash_register_id'   => $this->getAttribute('cash_register_id') ?? null,
+            'created_by'         => auth()->id(),
+            'amount'             => $amount,
+            'type'               => 'payment',
+            'note'               => $data['note'] ?? null,
+            'customer_ledger_id' => $ledgerEntry->id,
+        ]);
+
+        // 3. Update balance
+        $customer->credit($amount); // reduce debt
 
         return $this;
     }
@@ -267,13 +398,11 @@ class OrderService extends TenantService
     }
 
 
-    public function cashRegisterLog()
-    {
-
-    }
+    public function cashRegisterLog() {}
 
     public function generateInvoiceId()
     {
+        Log::info('generateInvoiceId');
 
         $lastOrder = Order::query()
             ->select('last_invoice_number')
@@ -332,18 +461,16 @@ class OrderService extends TenantService
                     $variable = ['{first_name}', '{company_name}', '{invoice_id}', '{total}'];
                     $with_replace = [$this->model->customer->first_name ?? '', settings('company_name', 'Salex') ?? '', $this->model->invoice_number ?? '', $this->model->grand_total ?? ''];
                     $content = str_replace($variable, $with_replace, $smsTemplate->content);
-                        $this->sendSms($this->model->customer->phoneNumbers[0]->value, $content) ?? '';
+                    $this->sendSms($this->model->customer->phoneNumbers[0]->value, $content) ?? '';
                 } else {
                     $message = "Dear {$this->model->customer->first_name}, your invoice number is {$this->model->invoice_number}. You have purchase {$this->model->grand_total}" . __t('thanks_for_shopping_from_us_please_come_again');
-                        $this->sendSms($this->model->customer->phoneNumbers[0]->value, $message) ?? '';
+                    $this->sendSms($this->model->customer->phoneNumbers[0]->value, $message) ?? '';
                 }
             }
             return $this;
-
         } catch (\Exception $exception) {
             return $this;
         }
-
     }
 
     public function setDueCollectValidator(): static
@@ -358,22 +485,67 @@ class OrderService extends TenantService
     public function duePaymentReceive(): static
     {
 
-        $paidAmount = $this->model->paid_amount;
-        $dueAmount = $this->model->due_amount;
+        DB::transaction(function () {
 
-        $order = $this->model;
-        $order->paid_amount = $paidAmount + $this->getAttribute('due_amount');
-        $order->due_amount = $dueAmount - $this->getAttribute('due_amount');
+            $amount = (float) $this->getAttribute('due_amount');
+            $order  = $this->model;
 
-        if ($order->paid_amount >= $order->grand_total) {
-            $order->status_id = resolve(StatusRepository::class)->orderDone();
-        } else {
-            $order->status_id = resolve(StatusRepository::class)->orderDue();
-        }
-        $order->save();
+            $this->updateOrderAmounts($order, $amount);
+            $ledger = $this->createCustomerLedger($order, $amount);
+            $this->createCustomerTransaction($order, $amount, $ledger);
+            $this->updateCustomerBalance($order->customer, $amount);
+        });
 
         return $this;
     }
+
+    private function updateOrderAmounts(Order $order, float $amount): void
+    {
+        $order->increment('paid_amount', $amount);
+        $order->decrement('due_amount', $amount);
+
+        $order->status_id = $order->paid_amount >= $order->grand_total
+            ? resolve(StatusRepository::class)->orderDone()
+            : resolve(StatusRepository::class)->orderDue();
+
+        $order->save();
+    }
+    private function createCustomerLedger(Order $order, float $amount): CustomerLedger
+    {
+        return CustomerLedger::create([
+            'customer_id'    => $order->customer_id,
+            'type'           => 'payment',
+            'direction'      => 'credit',
+            'amount'         => $amount,
+            'description'    => "Due payment received - Invoice #{$order->invoice_number}",
+            'reference_type' => Order::class,
+            'reference_id'   => $order->id,
+            'created_by'     => auth()->id(),
+        ]);
+    }
+
+    private function createCustomerTransaction(
+        Order $order,
+        float $amount,
+        CustomerLedger $ledger
+    ): void {
+        CustomerTransaction::create([
+            'customer_id'        => $order->customer_id,
+            'payment_method_id'  => $this->getAttribute('payment_method_id'),
+            'cash_register_id'   => $this->getAttribute('cash_register_id'),
+            'created_by'         => auth()->id(),
+            'amount'             => $amount,
+            'type'               => 'payment',
+            'note'               => $this->getAttribute('note'),
+            'customer_ledger_id' => $ledger->id,
+        ]);
+    }
+    private function updateCustomerBalance($customer, float $amount): void
+    {
+        // credit means reduce due
+        $customer->credit($amount);
+    }
+
 
     public function cashCounterLog($transaction): static
     {
@@ -524,7 +696,7 @@ class OrderService extends TenantService
                             <div>' . $item->discount . '</div>  
                         </td>
                         <td>
-                            <div>' . $item->quantity. '</div> 
+                            <div>' . $item->quantity . '</div> 
                         </td>
                         <td>
                             <div>' . $item->price .  '</div>
@@ -532,7 +704,6 @@ class OrderService extends TenantService
                         <td class="text-right">' . number_formatter($item->sub_total) . '</td>
                     </tr>
                 ';
-
             }
             $invoiceTemplate = Str::replace("{item_details}", $orderItemArray, $invoiceTemplate);
         }
@@ -579,7 +750,15 @@ class OrderService extends TenantService
         }
 
         if (strpos($invoiceTemplate, '{payment_details}') > -1) {
-            $invoiceTemplate = Str::replace("{payment_details}", $this->model->paymentMethod->name ?? '', $invoiceTemplate);
+            $paymentNames = $this->model->transactions
+                ->map(fn($t) => $t->paymentMethod->name . ' (' . number_formatter($t->amount) . ')')
+                ->implode(', ');
+
+            $invoiceTemplate = Str::replace(
+                "{payment_details}",
+                $paymentNames,
+                $invoiceTemplate
+            );
         }
 
         if (strpos($invoiceTemplate, '{invoice_id}') > -1) {
@@ -614,6 +793,4 @@ class OrderService extends TenantService
             'invoice_template' => $invoiceTemplate
         ];
     }
-
-
 }

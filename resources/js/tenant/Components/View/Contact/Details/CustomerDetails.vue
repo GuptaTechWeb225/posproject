@@ -186,6 +186,12 @@ export default {
                     "component": "app-customer-order-list",
                     'permission': '',
                     "props": this.customerId,
+                },
+                 {
+                    'name': this.$t('customer_ledger'),
+                    "component": "app-customer-ledger",
+                    'permission': '',
+                    "props": this.customerId,
                 }
             ]
         }

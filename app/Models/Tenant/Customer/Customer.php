@@ -15,7 +15,7 @@ class Customer extends TenantModel
     use HasFactory, CustomerRules, CustomerRelationship, ContactRelationship, BootTrait, UserRelationship;
 
     protected $fillable = [
-        'customer_group_id', 'first_name', 'last_name','email','phone_number', 'tin', 'created_by', 'tenant_id'
+        'customer_group_id', 'first_name', 'last_name','email','phone_number', 'tin', 'created_by', 'tenant_id','current_balance'
     ]; //this phone_number is not used. phone_number is using from contacts table ...
 
     public function getFullNameAttribute()
@@ -31,5 +31,7 @@ class Customer extends TenantModel
     }
 
     protected $appends = ['full_name'];
+
+    
 
 }

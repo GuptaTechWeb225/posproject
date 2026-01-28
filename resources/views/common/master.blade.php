@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="<?php  app()->getLocale(); ?>" dir="{{ config('settings.application.layout') }}">
+<html lang="{{ app()->getLocale() }}" dir="{{ config('settings.application.layout') }}">
 <head>
     <meta charset="UTF-8"/>
     <meta name="viewport"

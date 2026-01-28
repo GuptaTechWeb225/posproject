@@ -1020,6 +1020,7 @@ return array_merge([
     // Order
     'export_order_list' => 'Export order list',
     'order_list' => 'Order list',
+    'customer_ledger' => 'Customer ledger',
     'sales_date' => 'Sales date',
     'total_amount' => 'Total amount',
     'sub_total' => 'Sub-Total',

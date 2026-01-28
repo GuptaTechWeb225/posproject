@@ -26,6 +26,8 @@ class User extends BaseUser implements HasLocalePreference
         'first_name', 'last_name', 'email', 'branch_or_warehouse_id'
     ];
 
+    protected $fillable = ['current_balance'];
+
     use UserAttribute,
         UserMethod,
         UserRelationship,
@@ -65,4 +67,6 @@ class User extends BaseUser implements HasLocalePreference
     {
         return $this->belongsTo(BranchOrWarehouse::class);
     }
+
+  
 }
